@@ -6,6 +6,44 @@ require "active_record"
 require "action_mailer"
 Sidekiq::DelayExtensions.enable_delay!
 
+class MyModel < ActiveRecord::Base
+  def self.long_class_method
+    raise "Should not be called!"
+  end
+
+  def self.long_class_method_with_optional_args(*arg, **kwargs)
+    [arg, kwargs]
+  end
+end
+
+class UserMailer < ActionMailer::Base
+  def greetings(a, b)
+    raise "Should not be called!"
+  end
+
+  def greetings_with_optional_args(*arg, **kwargs)
+    [arg, kwargs]
+  end
+end
+
+class SomeClass
+  def self.doit(arg)
+  end
+
+  def self.doit_with_optional_args(*arg, **kwargs)
+    [arg, kwargs]
+  end
+end
+
+module SomeModule
+  def self.doit(arg)
+  end
+
+  def self.doit_with_optional_args(*arg, **kwargs)
+    [arg, kwargs]
+  end
+end
+
 describe Sidekiq::DelayExtensions do
   before do
     Sidekiq.redis { |c| c.flushdb }
@@ -24,6 +62,49 @@ describe Sidekiq::DelayExtensions do
     MyModel.delay.long_class_method
     assert_equal ["default"], Sidekiq::Queue.all.map(&:name)
     assert_equal 1, q.size
+  end
+
+  it "allows delayed execution of ActiveRecord class methods with optional arguments" do
+    original_use_generic_proxy = Sidekiq::DelayExtensions.use_generic_proxy
+    Sidekiq::DelayExtensions.use_generic_proxy = true
+    assert_equal [], Sidekiq::Queue.all.map(&:name)
+    q = Sidekiq::Queue.new
+    assert_equal 0, q.size
+
+    MyModel.delay.long_class_method_with_optional_args("argument_a", "argument_b", with: :keywords)
+    assert_equal ["default"], Sidekiq::Queue.all.map(&:name)
+    assert_equal 1, q.size
+    obj = ::YAML.load q.first["args"].first
+    assert_equal(["argument_a", "argument_b", {"with" => "keywords"}], obj.last)
+    assert_equal(["argument_a", "argument_b", {"with" => "keywords"}], q.first.display_args)
+
+    Sidekiq::DelayExtensions.use_generic_proxy = false
+    q.clear
+
+    MyModel.delay.long_class_method_with_optional_args("argument_a", "argument_b", with: :keywords)
+    assert_equal ["default"], Sidekiq::Queue.all.map(&:name)
+    assert_equal 1, q.size
+    obj = ::YAML.load q.first["args"].first
+    assert_equal(["argument_a", "argument_b", {with: :keywords}], obj.last)
+    assert_equal(["argument_a", "argument_b", {with: :keywords}], q.first.display_args)
+  ensure
+    Sidekiq::DelayExtensions.use_generic_proxy = original_use_generic_proxy
+  end
+
+  it "forwards the keyword arguments to perform" do
+    original_use_generic_proxy = Sidekiq::DelayExtensions.use_generic_proxy
+    yml = "---\n- !ruby/class 'MyModel'\n- :long_class_method_with_optional_args\n- []\n- :with: :keywords\n"
+    Sidekiq::DelayExtensions.use_generic_proxy = true
+    result = Sidekiq::DelayExtensions::DelayedClass.new.perform(yml)
+    assert_equal([[], {with: :keywords}], result)
+
+    Sidekiq::DelayExtensions.use_generic_proxy = false
+    Sidekiq::Queue.new.clear
+
+    result = Sidekiq::DelayExtensions::DelayedClass.new.perform(yml)
+    assert_equal([[], {}], result)
+  ensure
+    Sidekiq::DelayExtensions.use_generic_proxy = original_use_generic_proxy
   end
 
   it "uses and stringifies specified options" do
@@ -65,6 +146,33 @@ describe Sidekiq::DelayExtensions do
     assert_equal 1, q.size
   end
 
+  it "allows delayed delivery of ActionMailer mails with optional arguments" do
+    original_use_generic_proxy = Sidekiq::DelayExtensions.use_generic_proxy
+    Sidekiq::DelayExtensions.use_generic_proxy = true
+    assert_equal [], Sidekiq::Queue.all.map(&:name)
+    q = Sidekiq::Queue.new
+    assert_equal 0, q.size
+
+    UserMailer.delay.greetings_with_optional_args("argument_a", "argument_b", with: :keywords)
+    assert_equal ["default"], Sidekiq::Queue.all.map(&:name)
+    assert_equal 1, q.size
+    obj = ::YAML.load q.first["args"].first
+    assert_equal(["argument_a", "argument_b", {"with" => "keywords"}], obj.last)
+    assert_equal(["argument_a", "argument_b", {"with" => "keywords"}], q.first.display_args)
+
+    Sidekiq::DelayExtensions.use_generic_proxy = false
+    Sidekiq::Queue.new.clear
+
+    UserMailer.delay.greetings_with_optional_args("argument_a", "argument_b", with: :keywords)
+    assert_equal ["default"], Sidekiq::Queue.all.map(&:name)
+    assert_equal 1, q.size
+    obj = ::YAML.load q.first["args"].first
+    assert_equal(["argument_a", "argument_b", {with: :keywords}], obj.last)
+    assert_equal(["argument_a", "argument_b", {with: :keywords}], q.first.display_args)
+  ensure
+    Sidekiq::DelayExtensions.use_generic_proxy = original_use_generic_proxy
+  end
+
   it "allows delayed scheduling of AM mails" do
     ss = Sidekiq::ScheduledSet.new
     assert_equal 0, ss.size
@@ -91,9 +199,44 @@ describe Sidekiq::DelayExtensions do
     assert_equal 1, q.size
   end
 
-  module SomeModule
-    def self.doit(arg)
-    end
+  it "allows delay of any ole class method with optional arguments" do
+    original_use_generic_proxy = Sidekiq::DelayExtensions.use_generic_proxy
+
+    Sidekiq::DelayExtensions.use_generic_proxy = true
+    q = Sidekiq::Queue.new
+    assert_equal 0, q.size
+
+    SomeClass.delay.doit_with_optional_args("argument_a", "argument_b", with: :keywords)
+    assert_equal 1, q.size
+    obj = ::YAML.load q.first["args"].first
+    assert_equal(["argument_a", "argument_b", {"with" => "keywords"}], obj.last)
+    assert_equal(["argument_a", "argument_b", {"with" => "keywords"}], q.first.display_args)
+
+    Sidekiq::DelayExtensions.use_generic_proxy = false
+    q.clear
+
+    SomeClass.delay.doit_with_optional_args("argument_a", "argument_b", with: :keywords)
+    assert_equal 1, q.size
+    obj = ::YAML.load q.first["args"].first
+    assert_equal(["argument_a", "argument_b", {with: :keywords}], obj.last)
+    assert_equal(["argument_a", "argument_b", {with: :keywords}], q.first.display_args)
+  ensure
+    Sidekiq::DelayExtensions.use_generic_proxy = original_use_generic_proxy
+  end
+
+  it "forwards the keyword arguments to perform" do
+    original_use_generic_proxy = Sidekiq::DelayExtensions.use_generic_proxy
+    yml = "---\n- !ruby/class 'SomeClass'\n- :doit_with_optional_args\n- []\n- :with: :keywords\n"
+
+    Sidekiq::DelayExtensions.use_generic_proxy = true
+    result = Sidekiq::DelayExtensions::DelayedClass.new.perform(yml)
+    assert_equal([[], {with: :keywords}], result)
+
+    Sidekiq::DelayExtensions.use_generic_proxy = false
+    result = Sidekiq::DelayExtensions::DelayedClass.new.perform(yml)
+    assert_equal([[], {}], result)
+  ensure
+    Sidekiq::DelayExtensions.use_generic_proxy = original_use_generic_proxy
   end
 
   it "logs large payloads" do
@@ -108,5 +251,44 @@ describe Sidekiq::DelayExtensions do
     assert_equal 0, q.size
     SomeModule.delay.doit(Date.today)
     assert_equal 1, q.size
+  end
+
+  it "allows delay of any module class method with optional arguments" do
+    original_use_generic_proxy = Sidekiq::DelayExtensions.use_generic_proxy
+    Sidekiq::DelayExtensions.use_generic_proxy = true
+    q = Sidekiq::Queue.new
+    assert_equal 0, q.size
+
+    SomeModule.delay.doit_with_optional_args("argument_a", "argument_b", with: :keywords)
+    assert_equal 1, q.size
+    obj = ::YAML.load q.first["args"].first
+    assert_equal(["argument_a", "argument_b", {"with" => "keywords"}], obj.last)
+    assert_equal(["argument_a", "argument_b", {"with" => "keywords"}], q.first.display_args)
+
+    Sidekiq::DelayExtensions.use_generic_proxy = false
+    q.clear
+
+    SomeModule.delay.doit_with_optional_args("argument_a", "argument_b", with: :keywords)
+    assert_equal 1, q.size
+    obj = ::YAML.load q.first["args"].first
+    assert_equal(["argument_a", "argument_b", {with: :keywords}], obj.last)
+    assert_equal(["argument_a", "argument_b", {with: :keywords}], q.first.display_args)
+  ensure
+    Sidekiq::DelayExtensions.use_generic_proxy = original_use_generic_proxy
+  end
+
+  it "forwards the keyword arguments to perform" do
+    original_use_generic_proxy = Sidekiq::DelayExtensions.use_generic_proxy
+    yml = "---\n- !ruby/class 'SomeModule'\n- :doit_with_optional_args\n- []\n- :with: :keywords\n"
+
+    Sidekiq::DelayExtensions.use_generic_proxy = true
+    result = Sidekiq::DelayExtensions::DelayedClass.new.perform(yml)
+    assert_equal([[], {with: :keywords}], result)
+
+    Sidekiq::DelayExtensions.use_generic_proxy = false
+    result = Sidekiq::DelayExtensions::DelayedClass.new.perform(yml)
+    assert_equal([[], {}], result)
+  ensure
+    Sidekiq::DelayExtensions.use_generic_proxy = original_use_generic_proxy
   end
 end
